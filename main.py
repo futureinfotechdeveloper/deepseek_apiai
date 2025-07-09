@@ -9,6 +9,7 @@ import re
 import requests
 import json
 from typing import Optional, List, Dict, Any
+import os
 
 
 
@@ -389,8 +390,8 @@ async def health_check():
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run(app, host="127.0.0.1", port=8000)
     
 
