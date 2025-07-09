@@ -1,3 +1,6 @@
+
+
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_openai import ChatOpenAI
@@ -11,16 +14,13 @@ import json
 from typing import Optional, List, Dict, Any
 import os
 
-
-
 db_config = {
     'host': os.environ.get('DB_HOST'),
     'user': os.environ.get('DB_USER'),
     'password': os.environ.get('DB_PASSWORD'),
     'database': os.environ.get('DB_NAME')
 }
-
-
+# OpenRouter configuration
 openrouter_config = {
     'base_url': 'https://api.deepseek.com',
     'api_key': os.environ.get('OPENROUTER_API_KEY'),
@@ -285,25 +285,22 @@ You are a BNI or Business Network International data analyst with access to:
 {external_text}
 
 Response Guidelines:
-1. Get first the userid value and give the results based on that user from bni_rosterreport table with id column like this query 'SELECT * 
-FROM bni_rosterreport 
-WHERE id = userid;'
-2. For data visualization, you MUST provide charts in this exact format:
+1. For data visualization, you MUST provide charts in this exact format:
 ```chart
 type: bar/pie/line
 labels: ["Label1", "Label2"]
 data: [value1, value2]
 title: "Descriptive Title"
 
-3.The chart block should be the ONLY place where this format appears
+2.The chart block should be the ONLY place where this format appears
 
-4.For SQL-related questions:
+3.For SQL-related questions:
 
 -Generate a SQL query wrapped in sql block
 
 -Provide a brief explanation of the results
 
-5.Special Notes:
+4.Special Notes:
 
 -P = Present, A = Absent in bni_palms table
 
@@ -311,7 +308,7 @@ title: "Descriptive Title"
 
 -Only use TYFCB when referring to bni_palms data
 
-6.Keep responses concise and avoid repetition
+5.Keep responses concise and avoid repetition
 
 7.Members 30 Second Business Presentaion
 
@@ -394,4 +391,7 @@ async def health_check():
 #     import uvicorn
 #     uvicorn.run(app, host="127.0.0.1", port=8000)
     
-
+    
+    
+    
+    
