@@ -79,7 +79,7 @@ def get_all_tables_schema():
             try:
                 cursor.execute(f"DESCRIBE {table}")
                 columns = cursor.fetchall()
-                cursor.execute(f"SELECT * FROM {table} LIMIT 100")
+                cursor.execute(f"SELECT * FROM {table} where activestatus = 'Active' and teamname = 'Team1'")
                 sample = cursor.fetchall()
                 schema_info[table] = {"columns": columns, "sample_data": sample}
             except Exception as e:
