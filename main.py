@@ -3,14 +3,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from langchain_openai import ChatOpenAI
 from langchain.chains import ConversationChain
 from langchain.memory import ConversationBufferMemory
+import mysql.connector
 from pydantic import BaseModel
 import re
 import requests
 import json
 from typing import Optional, List, Dict, Any
-import os
 
-# OpenRouter configuration
+
+
+db_config = {
+    'host': os.environ.get('DB_HOST'),
+    'user': os.environ.get('DB_USER'),
+    'password': os.environ.get('DB_PASSWORD'),
+    'database': os.environ.get('DB_NAME')
+}
+
+
 openrouter_config = {
     'base_url': 'https://api.deepseek.com',
     'api_key': os.environ.get('OPENROUTER_API_KEY'),
@@ -34,6 +43,63 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     user_id: str
     question: str
+    
+
+
+def get_db_connection():
+    return mysql.connector.connect(**db_config)
+
+# def get_all_tables_schema():
+#     conn = get_db_connection()
+#     cursor = conn.cursor(dictionary=True)
+#     try:
+#         cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()")
+#         tables = [t['table_name'] for t in cursor.fetchall()]
+#         schema_info = {}
+#         for table in tables:
+#             cursor.execute(f"DESCRIBE {table}")
+#             columns = cursor.fetchall()
+#             cursor.execute(f"SELECT * FROM {table} LIMIT 2")
+#             sample = cursor.fetchall()
+#             schema_info[table] = {"columns": columns, "sample_data": sample}
+#         return schema_info
+#     finally:
+#         cursor.close()
+#         conn.close()
+def get_all_tables_schema():
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        target_tables = ['bni_rosterreport']
+        # target_tables = ['bni_rosterreport', 'bni_palms', 'bni_trainingmaster']
+        schema_info = {}
+
+        for table in target_tables:
+            try:
+                cursor.execute(f"DESCRIBE {table}")
+                columns = cursor.fetchall()
+                cursor.execute(f"SELECT * FROM {table} LIMIT 100")
+                sample = cursor.fetchall()
+                schema_info[table] = {"columns": columns, "sample_data": sample}
+            except Exception as e:
+                schema_info[table] = {"error": str(e)}
+
+        return schema_info
+    finally:
+        cursor.close()
+        conn.close()
+
+def format_schema_for_ai(schema_info):
+    schema_text = ""
+    for table, info in schema_info.items():
+        schema_text += f"Table: {table}\nColumns:\n"
+        for col in info['columns']:
+            schema_text += f"- {col['Field']} ({col['Type']})\n"
+        schema_text += "Sample Data:\n"
+        for row in info['sample_data']:
+            schema_text += f"{row}\n"
+        schema_text += "=" * 40 + "\n"
+    return schema_text
 
 def get_external_data():
     try:
@@ -51,6 +117,33 @@ def format_external_data_for_ai(data):
         text += f"{i}. {json.dumps(row)}\n"
     return text
 
+def extract_sql_query(response_text: str):
+    sql_match = re.search(r'```sql\n(.*?)\n```', response_text, re.DOTALL)
+    if sql_match:
+        return sql_match.group(1).strip()
+    select_match = re.search(r'(SELECT .*?;)', response_text, re.DOTALL | re.IGNORECASE)
+    if select_match:
+        return select_match.group(1).strip()
+    return None
+
+def execute_sql_query(query: str):
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(query)
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
+
+def format_results_for_user(results: list, question: str) -> str:
+    if not results:
+        return "No results found."
+    response = f"Query Results ({len(results)} rows):\n"
+    for i, row in enumerate(results, 1):
+        response += f"{i}. " + ", ".join(f"{k}: {v}" for k, v in row.items()) + "\n"
+    return response
+
 def remove_repeated_lines(text: str) -> str:
     seen = set()
     result = []
@@ -59,6 +152,62 @@ def remove_repeated_lines(text: str) -> str:
             seen.add(line.strip())
             result.append(line)
     return "\n".join(result)
+
+def detect_chart_type(results: list, question: str) -> Optional[str]:
+    """Determine if results should be charted and what type"""
+    if not results or len(results) < 2:
+        return None
+    
+    # Check if we have numeric data
+    has_numeric = any(isinstance(v, (int, float)) for row in results for v in row.values() if isinstance(v, (int, float)))
+    
+    if not has_numeric:
+        return None
+    
+    question_lower = question.lower()
+    
+    # Simple detection logic
+    if "count" in question_lower or "percentage" in question_lower or "proportion" in question_lower:
+        return "pie"
+    elif "trend" in question_lower or "over time" in question_lower or "month" in question_lower:
+        return "line"
+    elif "compare" in question_lower or "versus" in question_lower or "vs" in question_lower:
+        return "bar"
+    else:
+        return "bar"  # default to bar chart
+
+def generate_chart_data(results: list, chart_type: str, question: str) -> Dict[str, Any]:
+    """Convert query results to chart data"""
+    if not results:
+        return {}
+    
+    chart_data = {
+        "chart_type": chart_type,
+        "title": f"Results for: {question[:50]}" + ("..." if len(question) > 50 else ""),
+        "labels": [],
+        "data": []
+    }
+    
+    # Try to automatically determine labels and data
+    if len(results[0]) >= 2:
+        # Use first column for labels, second for data
+        key_col = list(results[0].keys())[0]
+        value_col = list(results[0].keys())[1]
+        
+        chart_data["labels"] = [str(row[key_col]) for row in results]
+        try:
+            chart_data["data"] = [float(row[value_col]) for row in results]
+        except (ValueError, TypeError):
+            # If conversion fails, try counting instead
+            chart_data["data"] = [1 for _ in results]
+    
+    # Special handling for pie charts to ensure percentages
+    if chart_type == "pie" and chart_data["data"]:
+        total = sum(chart_data["data"])
+        if total > 0:
+            chart_data["data"] = [round((v/total)*100, 2) for v in chart_data["data"]]
+    
+    return chart_data
 
 def extract_chart_suggestions(response_text: str) -> List[Dict[str, Any]]:
     """Extract chart configurations from AI response"""
@@ -88,6 +237,7 @@ def extract_chart_suggestions(response_text: str) -> List[Dict[str, Any]]:
                     if key in ['type', 'chart_type']:
                         chart_data["chart_type"] = value.lower()
                     elif key == 'labels':
+                        # Handle both JSON arrays and comma-separated values
                         if value.startswith('['):
                             chart_data["labels"] = json.loads(value)
                         else:
@@ -100,14 +250,9 @@ def extract_chart_suggestions(response_text: str) -> List[Dict[str, Any]]:
                     elif key == 'title':
                         chart_data["title"] = value.strip(' "\'')
             
-            # Validate chart data
-            if chart_data["labels"] and chart_data["data"] and len(chart_data["labels"]) == len(chart_data["data"]):
-                # Ensure numeric data
-                try:
-                    chart_data["data"] = [float(x) for x in chart_data["data"]]
-                    charts.append(chart_data)
-                except (ValueError, TypeError):
-                    continue
+            # Only add if we have valid data
+            if chart_data["labels"] and chart_data["data"]:
+                charts.append(chart_data)
                 
         except Exception as e:
             print(f"Error parsing chart suggestion: {e}")
@@ -118,46 +263,62 @@ def extract_chart_suggestions(response_text: str) -> List[Dict[str, Any]]:
 # Global memory and chain
 chat_chain = None
 memory = None
+
 @app.on_event("startup")
 async def startup_event():
     global chat_chain, memory
 
+    schema_info = get_all_tables_schema()
     external_info = get_external_data()
+
+    schema_text = format_schema_for_ai(schema_info)
     external_text = format_external_data_for_ai(external_info)
 
     system_prompt = f"""
-You are a BNI data analyst assistant. Analyze this data:
+You are a BNI or Business Network International data analyst with access to:
+
+1. MySQL database with the following schema:
+{schema_text}
+
+2. External API data:
 {external_text}
 
-
 Response Guidelines:
-1. For data visualization, provide charts in this exact format:
+1. Get first the userid value and give the results based on that user from bni_rosterreport table with id column like this query 'SELECT * 
+FROM bni_rosterreport 
+WHERE id = userid;'
+2. For data visualization, you MUST provide charts in this exact format:
 ```chart
 type: bar/pie/line
 labels: ["Label1", "Label2"]
 data: [value1, value2]
-title: "Chart Title"
-2.Special Notes:
+title: "Descriptive Title"
 
-   -P = Present, A = Absent in attendance records
-   -TYFCB means "Thank You For Coming Back" (appreciation note)
-   -Only use TYFCB when referring to attendance data
+3.The chart block should be the ONLY place where this format appears
 
-3.Keep responses concise and focused on the available data
+4.For SQL-related questions:
 
-4.If asked for database-specific queries, explain you can only analyze available performance metrics
+-Generate a SQL query wrapped in sql block
 
-5.For chart data:
-    -Ensure labels and data arrays have the same length
-    -Only use numeric values in data arrays
-    -Keep titles descriptive but short
-    
-6. Keep responses in Proper Way Texts no use * or other in proper symbols 
+-Provide a brief explanation of the results
 
-7. Must include pie chart diagram for all the results  
-    
+5.Special Notes:
+
+-P = Present, A = Absent in bni_palms table
+
+-TYFCB means "Thanks note" (not TYFTB)
+
+-Only use TYFCB when referring to bni_palms data
+
+6.Keep responses concise and avoid repetition
+
+7.Members 30 Second Business Presentaion
+
+8.Members Business Testimonials.
+
+
+
 """
-
 
     llm = ChatOpenAI(
         openai_api_base=openrouter_config['base_url'],
@@ -174,7 +335,6 @@ title: "Chart Title"
     chat_chain = ConversationChain(llm=llm, memory=memory, verbose=False)
     memory.chat_memory.add_ai_message(system_prompt)
 
-
 @app.post("/chat")
 async def chat_with_database(request: ChatRequest):
     try:
@@ -185,32 +345,52 @@ async def chat_with_database(request: ChatRequest):
         response = remove_repeated_lines(response)
 
         # Initialize response components
-        charts = extract_chart_suggestions(response)
-        answer_text = re.sub(r'```chart\n.*?\n```', '', response, flags=re.DOTALL).strip()
+        sql_query = extract_sql_query(response)
+        results = None
+        charts = []
+        answer_text = response  # Default to full response
 
-        # Validate and clean charts
-        valid_charts = []
-        for chart in charts:
-            if len(chart['labels']) == len(chart['data']):
-                try:
-                    # Ensure all data points are numeric
-                    chart['data'] = [float(x) for x in chart['data']]
-                    valid_charts.append(chart)
-                except (ValueError, TypeError):
-                    continue
+        # Extract any explicit chart suggestions from AI
+        charts = extract_chart_suggestions(response)
+
+        # If we found charts in the response, remove the markdown from the answer text
+        if charts:
+            answer_text = re.sub(r'```chart\n.*?\n```', '', response, flags=re.DOTALL).strip()
+
+        # Process SQL queries if found
+        if sql_query:
+            results = execute_sql_query(sql_query)
+            formatted_results = format_results_for_user(results, request.question)
+            
+            # If we have results but no charts, try to auto-generate
+            if not charts:
+                chart_type = detect_chart_type(results, request.question)
+                if chart_type:
+                    charts.append(generate_chart_data(results, chart_type, request.question))
+            
+            # Combine the response text with results
+            answer_text = f"{answer_text}\n\n{formatted_results}".strip()
 
         return {
             "answer": answer_text,
-            "charts": valid_charts if valid_charts else None
+            "results": results,
+            "charts": charts if charts else None
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-    
+
 @app.get("/health")
 async def health_check():
-   return {"status": "healthy"}
+    try:
+        conn = get_db_connection()
+        conn.close()
+        return {"status": "healthy", "database": "connected"}
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
 
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run(app, host="127.0.0.1", port=8000)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+    
+
