@@ -1,6 +1,3 @@
-
-
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_openai import ChatOpenAI
@@ -14,12 +11,15 @@ import json
 from typing import Optional, List, Dict, Any
 import os
 
+
 db_config = {
     'host': os.environ.get('DB_HOST'),
     'user': os.environ.get('DB_USER'),
     'password': os.environ.get('DB_PASSWORD'),
     'database': os.environ.get('DB_NAME')
 }
+
+
 # OpenRouter configuration
 openrouter_config = {
     'base_url': 'https://api.deepseek.com',
@@ -29,7 +29,6 @@ openrouter_config = {
 
 # External API
 external_api_url = 'https://bniapi.futureinfotechservices.in/BNI/bniapiecomm.php'
-
 app = FastAPI()
 
 # CORS
@@ -79,7 +78,7 @@ def get_all_tables_schema():
             try:
                 cursor.execute(f"DESCRIBE {table}")
                 columns = cursor.fetchall()
-                cursor.execute(f"SELECT * FROM {table} where activestatus = 'Active' and teamname = 'Team1'")
+                cursor.execute(f"SELECT * FROM  bni_rosterreport  where activestatus = 'Active' and teamname = 'Team1' limit 100")
                 sample = cursor.fetchall()
                 schema_info[table] = {"columns": columns, "sample_data": sample}
             except Exception as e:
@@ -278,11 +277,23 @@ async def startup_event():
     system_prompt = f"""
 You are a BNI or Business Network International data analyst with access to:
 
+When a question includes "my" or "me" or "I", interpret it as referring to the user ID provided in the format "[question]" Not ID number show at any place.
+
+For user-specific questions like "What is my score?", query the database using the provided user ID.
+
+
+
+Special user-related columns:
+- bni_rosterreport.member_id for member identification
+- bni_palms.user_id for performance metrics
+
+
 1. MySQL database with the following schema:
 {schema_text}
 
 2. External API data:
 {external_text}
+
 
 Response Guidelines:
 1. For data visualization, you MUST provide charts in this exact format:
@@ -302,11 +313,7 @@ title: "Descriptive Title"
 
 4.Special Notes:
 
--P = Present, A = Absent in bni_palms table
-
--TYFCB means "Thanks note" (not TYFTB)
-
--Only use TYFCB when referring to bni_palms data
+-TYFTB means "Thanks note"
 
 5.Keep responses concise and avoid repetition
 
@@ -338,9 +345,15 @@ async def chat_with_database(request: ChatRequest):
     try:
         global chat_chain, memory
         
+        
+        contextual_question = f"For user {request.user_id}: {request.question}"
+        
         # Get AI response
-        response = chat_chain.run(request.question)
+        response = chat_chain.run(contextual_question)
         response = remove_repeated_lines(response)
+        # Get AI response
+        # response = chat_chain.run(request.question)
+        # response = remove_repeated_lines(response)
 
         # Initialize response components
         sql_query = extract_sql_query(response)
@@ -390,8 +403,3 @@ async def health_check():
 # if __name__ == "__main__":
 #     import uvicorn
 #     uvicorn.run(app, host="127.0.0.1", port=8000)
-    
-    
-    
-    
-    
